@@ -64,8 +64,8 @@ private:
     void swap(util_timer *&a, util_timer *&b); // 交换节点
 
     std::vector<util_timer *> heap; // 堆容器
-    int size;                       // 当前堆大小
-    int capacity;                   // 堆容量
+
+    int capacity; // 堆容量
 };
 
 class Utils
