@@ -20,8 +20,8 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <sys/uio.h>
-
 #include <time.h>
+#include <vector>
 #include "../log/log.h"
 
 class util_timer;
@@ -36,33 +36,36 @@ struct client_data
 class util_timer
 {
 public:
-    util_timer() : prev(NULL), next(NULL) {}
+    util_timer() : expire(0), cb_func(NULL), user_data(NULL), index(-1) {}
 
 public:
     time_t expire;
-    
-    void (* cb_func)(client_data *);
+    void (*cb_func)(client_data *);
     client_data *user_data;
-    util_timer *prev;
-    util_timer *next;
+
+    int index;
 };
 
-class sort_timer_lst
+class heap_timer_lst
 {
 public:
-    sort_timer_lst();
-    ~sort_timer_lst();
+    heap_timer_lst(int capacity = 1024);
+    ~heap_timer_lst();
 
     void add_timer(util_timer *timer);
     void adjust_timer(util_timer *timer);
     void del_timer(util_timer *timer);
     void tick();
+    void resize(); // 堆扩容
 
 private:
-    void add_timer(util_timer *timer, util_timer *lst_head);
+    void percolate_down(int hole);             // 下沉操作
+    void percolate_up(int hole);               // 上浮操作
+    void swap(util_timer *&a, util_timer *&b); // 交换节点
 
-    util_timer *head;
-    util_timer *tail;
+    std::vector<util_timer *> heap; // 堆容器
+    int size;                       // 当前堆大小
+    int capacity;                   // 堆容量
 };
 
 class Utils
@@ -72,27 +75,16 @@ public:
     ~Utils() {}
 
     void init(int timeslot);
-
-    //对文件描述符设置非阻塞
     int setnonblocking(int fd);
-
-    //将内核事件表注册读事件，ET模式，选择开启EPOLLONESHOT
     void addfd(int epollfd, int fd, bool one_shot, int TRIGMode);
-
-    //信号处理函数
     static void sig_handler(int sig);
-
-    //设置信号函数
     void addsig(int sig, void(handler)(int), bool restart = true);
-
-    //定时处理任务，重新定时以不断触发SIGALRM信号
     void timer_handler();
-
     void show_error(int connfd, const char *info);
 
 public:
     static int *u_pipefd;
-    sort_timer_lst m_timer_lst;
+    heap_timer_lst m_timer_lst; // 改用堆定时器
     static int u_epollfd;
     int m_TIMESLOT;
 };
