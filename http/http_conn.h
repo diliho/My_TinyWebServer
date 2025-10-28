@@ -59,7 +59,9 @@ public:
         FORBIDDEN_REQUEST,
         FILE_REQUEST,
         INTERNAL_ERROR,
-        CLOSED_CONNECTION
+        CLOSED_CONNECTION,
+        // 新增：用户名/密码长度超出限制
+        USER_INPUT_ERROR
     };
     enum LINE_STATUS
     {
@@ -86,7 +88,6 @@ public:
     int timer_flag;
     int improv;
 
-
 private:
     void init();
     HTTP_CODE process_read();
@@ -111,7 +112,7 @@ public:
     static int m_epollfd;
     static int m_user_count;
     MYSQL *mysql;
-    int m_state;  //读为0, 写为1
+    int m_state; // 读为0, 写为1
 
 private:
     int m_sockfd;
@@ -134,8 +135,8 @@ private:
     struct stat m_file_stat;
     struct iovec m_iv[2];
     int m_iv_count;
-    int cgi;        //是否启用的POST
-    char *m_string; //存储请求头数据
+    int cgi;         // 是否启用的POST
+    string m_string; // 存储请求头数据
     int bytes_to_send;
     int bytes_have_send;
     char *doc_root;
@@ -144,9 +145,15 @@ private:
     int m_TRIGMode;
     int m_close_log;
 
-    char sql_user[100];
-    char sql_passwd[100];
+    char sql_user[60];
+    char sql_passwd[60];
     char sql_name[100];
+    // 输入的user和passwd
+    string name, password;
+
+    // 新增：记录当前是登录(2)还是注册(3)场景
+    // 用于错误响应时返回对应页面
+    char m_input_scene;
 };
 
 #endif
