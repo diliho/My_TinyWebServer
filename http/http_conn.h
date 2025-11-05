@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <sys/uio.h>
 #include <map>
+#include <vector>
 
 #include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
@@ -86,7 +87,6 @@ public:
     int timer_flag;
     int improv;
 
-
 private:
     void init();
     HTTP_CODE process_read();
@@ -111,7 +111,7 @@ public:
     static int m_epollfd;
     static int m_user_count;
     MYSQL *mysql;
-    int m_state;  //读为0, 写为1
+    int m_state; // 读为0, 写为1
 
 private:
     int m_sockfd;
@@ -134,8 +134,8 @@ private:
     struct stat m_file_stat;
     struct iovec m_iv[2];
     int m_iv_count;
-    int cgi;        //是否启用的POST
-    char *m_string; //存储请求头数据
+    int cgi;        // 是否启用的POST
+    char *m_string; // 存储请求头数据
     int bytes_to_send;
     int bytes_have_send;
     char *doc_root;
@@ -147,6 +147,10 @@ private:
     char sql_user[100];
     char sql_passwd[100];
     char sql_name[100];
+
+public:
+    bool submit_async_read(struct io_uring *m_uring);
+    bool submit_async_write();
 };
 
 #endif
