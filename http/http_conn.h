@@ -150,7 +150,7 @@ private:
 
 public:
     bool submit_async_read(struct io_uring *m_uring);
-    bool submit_async_write();
+    bool submit_async_write(struct io_uring *m_uring);
 };
 
 #endif

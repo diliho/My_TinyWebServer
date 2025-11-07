@@ -1,6 +1,8 @@
 #include "webserver.h"
 #include <malloc.h>
 
+
+
 WebServer::WebServer()
 {
     // http_conn类对象
@@ -17,13 +19,9 @@ WebServer::WebServer()
     // 定时器
     users_timer = new client_data[MAX_FD];
 
-    // uring初始化
-    if (io_uring_queue_init(RING_ENTRIES, &m_uring, 0) < 0)
-    {
-        LOG_ERROR("%s", "io_uring_queue_init failure");
-        exit(EXIT_FAILURE);
-    }
-    m_use_liburing = false;
+    uring_init();
+    if (m_actormodel == 0)
+        is_ring = true;
 }
 
 WebServer::~WebServer()
@@ -36,7 +34,7 @@ WebServer::~WebServer()
     delete[] users_timer;
     delete m_pool;
 
-    io_uring_queue_exit(&m_uring);
+    io_uring_queue_exit(&m_ring);
 }
 
 void WebServer::init(int port, string user, string passWord, string databaseName, int log_write,
@@ -107,8 +105,19 @@ void WebServer::sql_pool()
 
 void WebServer::thread_pool()
 {
-    // 线程池
-    m_pool = new threadpool<http_conn>(m_actormodel, m_connPool, m_thread_num);
+     // 线程池构造时传入&m_ring
+    m_pool = new threadpool<http_conn>(m_actormodel, m_connPool, &m_ring, m_thread_num);
+}
+
+// 初始化io_uring
+void WebServer::uring_init()
+{
+    int ret = io_uring_queue_init(RING_ENTRIES, &m_ring, 0);
+    if (ret < 0)
+    {
+        LOG_ERROR("io_uring_queue_init failed: %s", strerror(-ret));
+        exit(EXIT_FAILURE);
+    }
 }
 
 void WebServer::eventListen()
@@ -148,8 +157,11 @@ void WebServer::eventListen()
     // Proactor模式下使用liburing进行异步accept
     if (m_actormodel == 0)
     {
-        m_use_liburing = true;
-        submit_async_accept();
+        if (!submit_async_accept())
+        {
+            LOG_ERROR("submit async accept error");
+            return;
+        }
     }
     else
     { // epoll创建内核事件表
@@ -382,11 +394,11 @@ void WebServer::eventLoop()
 
     while (!stop_server)
     { // Proactor模式使用io_uring
-        if (m_use_liburing && m_actormodel == 0)
+        if (is_ring && m_actormodel == 0)
         {
             struct io_uring_cqe *cqe;
 
-            int ret = io_uring_wait_cqe(&m_uring, &cqe);
+            int ret = io_uring_wait_cqe(&m_ring, &cqe);
             if (ret < 0)
             {
                 LOG_ERROR("io_uring_wait_cqe failure, ret: %d", ret);
@@ -396,7 +408,7 @@ void WebServer::eventLoop()
             if (!ci)
             {
                 LOG_ERROR("Invalid conn_info in CQE");
-                io_uring_cqe_seen(&m_uring, cqe);
+                io_uring_cqe_seen(&m_ring, cqe);
                 continue;
             }
             if (ci->fd == m_listenfd && ci->op_type == OP_ACCEPT)
@@ -407,8 +419,15 @@ void WebServer::eventLoop()
             {
                 handle_async_read(cqe);
             }
-
-            io_uring_cqe_seen(&m_uring, cqe);
+            else if (ci->op_type == OP_WRITE)
+            {
+                handle_async_write(cqe);
+            }
+            else
+            {
+                LOG_ERROR("op_type error for fd: %d", ci->fd);
+            }
+            io_uring_cqe_seen(&m_ring, cqe);
         }
         else
         {
@@ -494,6 +513,10 @@ void WebServer::handle_async_accept(struct io_uring_cqe *cqe)
         m_user,
         m_passWord,
         m_databaseName);
+    if (!users[new_connfd].submit_async_read(&m_ring))
+    {
+        LOG_ERROR("submit async read faiied fo fd: %d", new_connfd);
+    }
 
     free(ci);
 
@@ -516,38 +539,38 @@ void WebServer::handle_async_read(struct io_uring_cqe *cqe)
     }
     else
     {
+
         if (!m_pool->append(&users[sockfd], 0))
         {
             LOG_ERROR("Read buffer overflow, fd: %d", sockfd);
         }
     }
 }
-
-void WebServer::submit_async_accept()
+bool WebServer::submit_async_accept()
 {
-    if (!m_use_liburing)
+    if (!is_ring)
     {
         LOG_ERROR("async accept is invalued");
-        return;
+        return false;
     }
 
     struct conn_info *ci = (struct conn_info *)malloc(sizeof(struct conn_info));
     if (!ci)
     {
         LOG_ERROR("malloc conn_info failed");
-        return;
+        return false;
     }
 
     ci->fd = m_listenfd;
     ci->op_type = OP_ACCEPT;
     ci->client_len = sizeof(ci->client_addr);
 
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&m_uring);
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&m_ring);
     if (!sqe)
     {
         LOG_ERROR("io_uring_get_sqe failed (queue full)");
         free(ci);
-        return;
+        return false;
     }
 
     io_uring_prep_accept(
@@ -559,11 +582,29 @@ void WebServer::submit_async_accept()
 
     io_uring_sqe_set_data(sqe, ci);
 
-    int ret = io_uring_submit(&m_uring);
+    int ret = io_uring_submit(&m_ring);
     if (ret <= 0)
     {
         LOG_ERROR("io_uring_submit failed: %d, errno: %d", ret, errno);
         free(ci);
+        return false;
+    }
+    return true;
+}
+void WebServer::handle_async_write(struct io_uring_cqe *cqe)
+{
+    int ret = cqe->res;
+    struct conn_info *ci = (struct conn_info *)io_uring_cqe_get_data(cqe);
+    if (ret <= 0)
+    {
+        LOG_ERROR("async write error for fd: %d", ci->fd);
         return;
+    }
+    if (!m_OPT_LINGER)
+    {
+        users[ci->fd].close_conn();
+    }
+    else
+    {
     }
 }

@@ -20,9 +20,11 @@
 const int MAX_FD = 65536;           // 最大文件描述符
 const int MAX_EVENT_NUMBER = 10000; // 最大事件数
 const int TIMESLOT = 5;             // 最小超时单位
+const int RING_ENTRIES = 1024;      // io_uring队列深度
 
 #define OP_ACCEPT 0
 #define OP_READ 1
+#define OP_WRITE 2
 
 struct conn_info
 {
@@ -93,13 +95,12 @@ public:
 
     // 新增
 public:
-    struct io_uring m_uring;
-    bool m_use_liburing;
-    static const int RING_ENTRIES = 1024;
-
-    void submit_async_accept();
-    void handle_async_accept(struct io_uring_cqe *cqe);
-
+    struct io_uring m_ring;
+    bool is_ring;
+    void uring_init();
+    bool submit_async_accept();
     void handle_async_read(struct io_uring_cqe *cqe);
+    void handle_async_write(struct io_uring_cqe *cqe);
+    void handle_async_accept(struct io_uring_cqe *cqe);
 };
 #endif

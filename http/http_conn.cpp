@@ -745,3 +745,43 @@ bool http_conn::submit_async_read(struct io_uring *ring)
 
     return true;
 }
+bool http_conn::submit_async_write(struct io_uring *ring)
+{
+    if (bytes_to_send == 0)
+    {
+        if (!m_linger)
+            return close_conn(), true;
+        return true;
+    }
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    if (!sqe)
+    {
+        LOG_ERROR("Failed to get SQE for read, fd: %d", m_sockfd);
+        return false;
+    }
+    io_uring_prep_write(
+        sqe,
+        m_sockfd,
+        m_write_buf + bytes_have_send,
+        bytes_to_send - bytes_have_send,
+        0);
+    struct conn_info *ci = (struct conn_info *)malloc(sizeof(struct conn_info));
+    if (!ci)
+    {
+        LOG_ERROR("Malloc conn_info failed, fd: %d", m_sockfd);
+        return false;
+    }
+    ci->fd = m_sockfd;
+    ci->op_type = OP_WRITE;
+    io_uring_sqe_set_data(sqe, ci);
+
+    int ret = io_uring_submit(ring);
+    if (ret <= 0)
+    {
+        LOG_ERROR("io_uring_submit write failed: %d, errno: %d, fd: %d", ret, errno, m_sockfd);
+        free(ci);
+        return false;
+    }
+
+    return true;
+}
