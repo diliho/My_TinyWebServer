@@ -18,11 +18,7 @@ WebServer::WebServer()
     // 定时器
     users_timer = new client_data[MAX_FD];
 
-    if (m_actormodel == 0)
-    {
-        uring_init();
-        is_ring = true;
-    }
+        is_ring=false;
 }
 
 WebServer::~WebServer()
@@ -34,7 +30,7 @@ WebServer::~WebServer()
     delete[] users;
     delete[] users_timer;
     delete m_pool;
-
+if(is_ring)
     io_uring_queue_exit(&m_ring);
 }
 
@@ -52,6 +48,12 @@ void WebServer::init(int port, string user, string passWord, string databaseName
     m_TRIGMode = trigmode;
     m_close_log = close_log;
     m_actormodel = actor_model;
+
+    if(m_actormodel==0)
+    {
+        uring_init();
+        is_ring=true;
+    }
 }
 
 void WebServer::trig_mode()
@@ -429,7 +431,7 @@ void WebServer::eventLoop()
                 LOG_ERROR("op_type error for fd: %d", ci->fd);
             }
             io_uring_cqe_seen(&m_ring, cqe);
-            free(ci);
+            
         }
         else
         {

@@ -606,7 +606,7 @@ bool http_conn::add_status_line(int status, const char *title)
 }
 bool http_conn::add_headers(int content_len)
 {
-    return add_content_length(content_len) && add_linger() &&
+    return add_content_length(content_len) && add_content_type() && add_linger() &&
            add_blank_line();
 }
 bool http_conn::add_content_length(int content_len)
@@ -697,16 +697,35 @@ void http_conn::process()
         {
             modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
         }
+        else
+        {
+            // 在proactor模式下，如果没有足够的数据继续读取，需要重新提交异步读
+            if (!submit_async_read(&WebServer::get_instance()->m_ring))
+            {
+                LOG_ERROR("Failed to resubmit async read, fd: %d", m_sockfd);
+                close_conn();
+            }
+        }
         return;
     }
     bool write_ret = process_write(read_ret);
     if (!write_ret)
     {
         close_conn();
+        return;
     }
     if (WebServer::get_instance()->is_ring == false)
     {
         modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
+    }
+    else
+    {
+        // 在proactor模式下，处理完请求后需要提交异步写操作
+        if (!submit_async_write(&WebServer::get_instance()->m_ring))
+        {
+            LOG_ERROR("Failed to submit async write, fd: %d", m_sockfd);
+            close_conn();
+        }
     }
     return;
 }
