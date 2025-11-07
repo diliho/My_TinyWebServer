@@ -693,7 +693,10 @@ void http_conn::process()
     HTTP_CODE read_ret = process_read();
     if (read_ret == NO_REQUEST)
     {
-        modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
+        if (WebServer::get_instance()->is_ring == false)
+        {
+            modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
+        }
         return;
     }
     bool write_ret = process_write(read_ret);
@@ -701,7 +704,11 @@ void http_conn::process()
     {
         close_conn();
     }
-    modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
+    if (WebServer::get_instance()->is_ring == false)
+    {
+        modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
+    }
+    return;
 }
 bool http_conn::submit_async_read(struct io_uring *ring)
 {

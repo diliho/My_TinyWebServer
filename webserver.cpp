@@ -1,8 +1,9 @@
 #include "webserver.h"
 #include <malloc.h>
-
+WebServer *WebServer::m_instance = nullptr;
 WebServer::WebServer()
 {
+    m_instance = this;
     // http_conn类对象
     users = new http_conn[MAX_FD];
 
@@ -17,9 +18,11 @@ WebServer::WebServer()
     // 定时器
     users_timer = new client_data[MAX_FD];
 
-    uring_init();
     if (m_actormodel == 0)
+    {
+        uring_init();
         is_ring = true;
+    }
 }
 
 WebServer::~WebServer()
@@ -426,6 +429,7 @@ void WebServer::eventLoop()
                 LOG_ERROR("op_type error for fd: %d", ci->fd);
             }
             io_uring_cqe_seen(&m_ring, cqe);
+            free(ci);
         }
         else
         {
@@ -491,6 +495,7 @@ void WebServer::handle_async_accept(struct io_uring_cqe *cqe)
     if (!ci)
     {
         LOG_ERROR("get user_data failed");
+        submit_async_accept();
         return;
     }
 
@@ -498,9 +503,18 @@ void WebServer::handle_async_accept(struct io_uring_cqe *cqe)
     {
         LOG_ERROR("async accept failed: %d", cqe->res);
         free(ci);
+        submit_async_accept();
         return;
     }
     int new_connfd = cqe->res;
+
+    if (http_conn::m_user_count >= MAX_FD)
+    {
+        LOG_ERROR("Internal server busy, too many connections");
+        close(new_connfd);
+        free(ci);
+        submit_async_accept();
+    }
     // 为新连接创建并初始化一个http_conn实例
     users[new_connfd].init(
         new_connfd,
@@ -511,9 +525,13 @@ void WebServer::handle_async_accept(struct io_uring_cqe *cqe)
         m_user,
         m_passWord,
         m_databaseName);
+
+    timer(new_connfd, ci->client_addr);
+
     if (!users[new_connfd].submit_async_read(&m_ring))
     {
-        LOG_ERROR("submit async read faiied fo fd: %d", new_connfd);
+        LOG_ERROR("submit async read failed for fd: %d", new_connfd);
+        users[new_connfd].close_conn();
     }
 
     free(ci);
@@ -527,28 +545,55 @@ void WebServer::handle_async_accept(struct io_uring_cqe *cqe)
 void WebServer::handle_async_read(struct io_uring_cqe *cqe)
 {
     struct conn_info *ci = (struct conn_info *)io_uring_cqe_get_data(cqe);
+    if (!ci)
+    {
+        LOG_ERROR("Invalid conn_info in async read");
+        return;
+    }
     int sockfd = ci->fd;
 
     int res = cqe->res;
-    if (res <= 0)
+    if (res < 0)
     {
         LOG_ERROR("Read failed, fd: %d, res: %zd", sockfd, res);
         users[sockfd].close_conn();
     }
+    else if (res == 0)
+    {
+        LOG_INFO("Client closed connection, fd: %d", sockfd);
+        users[sockfd].close_conn();
+    }
     else
     {
-
-        if (!m_pool->append(&users[sockfd], 0))
+        int m_read_idx = users[sockfd].get_m_read_idx();
+        if (m_read_idx + res > users[sockfd].READ_BUFFER_SIZE)
         {
-            LOG_ERROR("Read buffer overflow, fd: %d", sockfd);
+            LOG_ERROR("READ_BUFFER_SIZE overflow ,fd %d", sockfd);
+            users[sockfd].add_read_bytes(users[sockfd].READ_BUFFER_SIZE - (m_read_idx + res));
+            adjust_timer(users_timer[sockfd].timer);
+        }
+        else
+        {
+            users[sockfd].add_read_bytes(res);
+            adjust_timer(users_timer[sockfd].timer);
+        }
+        if (!m_pool->append_p(&users[sockfd]))
+        {
+            LOG_ERROR("Failed to append task to thread pool, fd: %d", sockfd);
+            users[sockfd].close_conn();
+        }
+        else
+        {
+            LOG_INFO("Task appended to thread pool for fd: %d, read %d bytes", sockfd, res);
         }
     }
+    free(ci);
 }
 bool WebServer::submit_async_accept()
 {
     if (!is_ring)
     {
-        LOG_ERROR("async accept is invalued");
+        LOG_ERROR("async accept is invalid,io_uring not unitialized");
         return false;
     }
 
@@ -562,6 +607,7 @@ bool WebServer::submit_async_accept()
     ci->fd = m_listenfd;
     ci->op_type = OP_ACCEPT;
     ci->client_len = sizeof(ci->client_addr);
+    utils.setnonblocking(m_listenfd);
 
     struct io_uring_sqe *sqe = io_uring_get_sqe(&m_ring);
     if (!sqe)
@@ -587,22 +633,68 @@ bool WebServer::submit_async_accept()
         free(ci);
         return false;
     }
+    LOG_INFO("Async accept request submitted successfully");
     return true;
 }
 void WebServer::handle_async_write(struct io_uring_cqe *cqe)
 {
-    int ret = cqe->res;
+
     struct conn_info *ci = (struct conn_info *)io_uring_cqe_get_data(cqe);
-    if (ret <= 0)
+    if (!ci)
     {
-        LOG_ERROR("async write error for fd: %d", ci->fd);
+        LOG_ERROR("Invalid conn_info in async write");
         return;
     }
-    if (!m_OPT_LINGER)
+    int ret = cqe->res;
+    int sockfd = ci->fd;
+    if (ret < 0)
     {
-        users[ci->fd].close_conn();
+        LOG_ERROR("async write error for fd: %d", ci->fd);
+        users[sockfd].close_conn();
+    }
+    else if (ret == 0)
+    {
+        LOG_INFO("Client closed connection during write, fd: %d", sockfd);
+        users[sockfd].close_conn();
     }
     else
     {
+        users[sockfd].add_write_bytes(ret);
+        LOG_INFO("Async write completed, fd: %d, sent %d bytes", sockfd, ret);
+        adjust_timer(users_timer[sockfd].timer);
+        if (users[sockfd].get_bytes_have_send() < users[sockfd].get_bytes_to_send())
+        {
+            LOG_INFO("More data to send, fd: %d, remaining: %d bytes",
+                     sockfd, users[sockfd].get_bytes_to_send() - users[sockfd].get_bytes_have_send());
+            if (!users[sockfd].submit_async_write(&m_ring))
+            {
+                LOG_ERROR("Failed to submit async write, fd: %d", sockfd);
+                users[sockfd].close_conn();
+            }
+        }
+        else
+        {
+            LOG_INFO("Write completed, all %d bytes sent for fd: %d",
+                     users[sockfd].get_bytes_to_send(), sockfd);
+            if (users[sockfd].is_linger())
+            {
+                // 支持keep - alive
+                users[sockfd]
+                    .init();
+                LOG_INFO("Reset connection for keep-alive, fd: %d", sockfd);
+                if (!users[sockfd].submit_async_read(&m_ring))
+                {
+                    LOG_ERROR("Failed to submit async read, fd: %d", sockfd);
+                    users[sockfd].close_conn();
+                }
+            }
+            else
+
+            {
+                LOG_INFO("Closing non-keepalive connection, fd: %d", sockfd);
+                users[sockfd].close_conn();
+            }
+        }
     }
+    free(ci);
 }

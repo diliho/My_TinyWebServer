@@ -148,9 +148,18 @@ void threadpool<T>::run()
         }
         else
         {
+            LOG_INFO("Processing request in Proactor mode");
             connectionRAII mysqlcon(&request->mysql, m_connPool);
             request->process();
-            request->submit_async_write(m_ring);
+            if (!request->submit_async_write(m_ring))
+            {
+                LOG_ERROR("Failed to submit async write in thread pool");
+                request->close_conn();
+            }
+            else
+            {
+                LOG_INFO("Async write submitted successfully");
+            }
         }
     }
 }

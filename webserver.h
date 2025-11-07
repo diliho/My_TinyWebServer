@@ -35,9 +35,17 @@ struct conn_info
 };
 class WebServer
 {
+private:
+    static WebServer *m_instance;
+
 public:
     WebServer();
     ~WebServer();
+
+    static WebServer *get_instance()
+    {
+        return m_instance;
+    }
 
     void init(int port, string user, string passWord, string databaseName,
               int log_write, int opt_linger, int trigmode, int sql_num,
