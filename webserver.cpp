@@ -1,8 +1,6 @@
 #include "webserver.h"
 #include <malloc.h>
 
-
-
 WebServer::WebServer()
 {
     // http_conn类对象
@@ -105,7 +103,7 @@ void WebServer::sql_pool()
 
 void WebServer::thread_pool()
 {
-     // 线程池构造时传入&m_ring
+    // 线程池构造时传入&m_ring
     m_pool = new threadpool<http_conn>(m_actormodel, m_connPool, &m_ring, m_thread_num);
 }
 
