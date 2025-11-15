@@ -1,9 +1,8 @@
+
 #include "webserver.h"
-#include <malloc.h>
-WebServer *WebServer::m_instance = nullptr;
+
 WebServer::WebServer()
 {
-    m_instance = this;
     // http_conn类对象
     users = new http_conn[MAX_FD];
 
@@ -17,8 +16,6 @@ WebServer::WebServer()
 
     // 定时器
     users_timer = new client_data[MAX_FD];
-
-    is_ring = false;
 }
 
 WebServer::~WebServer()
@@ -30,8 +27,6 @@ WebServer::~WebServer()
     delete[] users;
     delete[] users_timer;
     delete m_pool;
-    if (is_ring)
-        io_uring_queue_exit(&m_ring);
 }
 
 void WebServer::init(int port, string user, string passWord, string databaseName, int log_write,
@@ -48,12 +43,6 @@ void WebServer::init(int port, string user, string passWord, string databaseName
     m_TRIGMode = trigmode;
     m_close_log = close_log;
     m_actormodel = actor_model;
-
-    if (m_actormodel == 0)
-    {
-        uring_init();
-        is_ring = true;
-    }
 }
 
 void WebServer::trig_mode()
@@ -108,19 +97,8 @@ void WebServer::sql_pool()
 
 void WebServer::thread_pool()
 {
-    // 线程池构造时传入&m_ring
-    m_pool = new threadpool<http_conn>(m_actormodel, m_connPool, &m_ring, m_thread_num);
-}
-
-// 初始化io_uring
-void WebServer::uring_init()
-{
-    int ret = io_uring_queue_init(RING_ENTRIES, &m_ring, 0);
-    if (ret < 0)
-    {
-        LOG_ERROR("io_uring_queue_init failed: %s", strerror(-ret));
-        exit(EXIT_FAILURE);
-    }
+    // 线程池
+    m_pool = new threadpool<http_conn>(m_actormodel, m_connPool, m_thread_num);
 }
 
 void WebServer::eventListen()
@@ -157,39 +135,28 @@ void WebServer::eventListen()
 
     utils.init(TIMESLOT);
 
-    // Proactor模式下使用liburing进行异步accept
-    if (m_actormodel == 0)
-    {
-        if (!submit_async_accept())
-        {
-            LOG_ERROR("submit async accept error");
-            return;
-        }
-    }
-    else
-    { // epoll创建内核事件表
-        epoll_event events[MAX_EVENT_NUMBER];
-        m_epollfd = epoll_create(5);
-        assert(m_epollfd != -1);
+    // epoll创建内核事件表
+    epoll_event events[MAX_EVENT_NUMBER];
+    m_epollfd = epoll_create(5);
+    assert(m_epollfd != -1);
 
-        utils.addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);
-        http_conn::m_epollfd = m_epollfd;
+    utils.addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);
+    http_conn::m_epollfd = m_epollfd;
 
-        ret = socketpair(PF_UNIX, SOCK_STREAM, 0, m_pipefd);
-        assert(ret != -1);
-        utils.setnonblocking(m_pipefd[1]);
-        utils.addfd(m_epollfd, m_pipefd[0], false, 0);
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, m_pipefd);
+    assert(ret != -1);
+    utils.setnonblocking(m_pipefd[1]);
+    utils.addfd(m_epollfd, m_pipefd[0], false, 0);
 
-        utils.addsig(SIGPIPE, SIG_IGN);
-        utils.addsig(SIGALRM, utils.sig_handler, false);
-        utils.addsig(SIGTERM, utils.sig_handler, false);
+    utils.addsig(SIGPIPE, SIG_IGN);
+    utils.addsig(SIGALRM, utils.sig_handler, false);
+    utils.addsig(SIGTERM, utils.sig_handler, false);
 
-        alarm(TIMESLOT);
+    alarm(TIMESLOT);
 
-        // 工具类,信号和描述符基础操作
-        Utils::u_pipefd = m_pipefd;
-        Utils::u_epollfd = m_epollfd;
-    }
+    // 工具类,信号和描述符基础操作
+    Utils::u_pipefd = m_pipefd;
+    Utils::u_epollfd = m_epollfd;
 }
 
 void WebServer::timer(int connfd, struct sockaddr_in client_address)
@@ -235,7 +202,7 @@ bool WebServer::dealclientdata()
 {
     struct sockaddr_in client_address;
     socklen_t client_addrlength = sizeof(client_address);
-    if (0 == m_LISTENTrigmode) // LT
+    if (0 == m_LISTENTrigmode)
     {
         int connfd = accept(m_listenfd, (struct sockaddr *)&client_address, &client_addrlength);
         if (connfd < 0)
@@ -252,7 +219,7 @@ bool WebServer::dealclientdata()
         timer(connfd, client_address);
     }
 
-    else // ET
+    else
     {
         while (1)
         {
@@ -315,7 +282,8 @@ void WebServer::dealwithread(int sockfd)
 {
     util_timer *timer = users_timer[sockfd].timer;
 
-    if (1 == m_actormodel) // proactor
+    // reactor
+    if (1 == m_actormodel)
     {
         if (timer)
         {
@@ -339,9 +307,9 @@ void WebServer::dealwithread(int sockfd)
             }
         }
     }
-    else // reactor
+    else
     {
-
+        // proactor
         if (users[sockfd].read_once())
         {
             LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
@@ -388,6 +356,23 @@ void WebServer::dealwithwrite(int sockfd)
             }
         }
     }
+    else
+    {
+        // proactor
+        if (users[sockfd].write())
+        {
+            LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+
+            if (timer)
+            {
+                adjust_timer(timer);
+            }
+        }
+        else
+        {
+            deal_timer(timer, sockfd);
+        }
+    }
 }
 
 void WebServer::eventLoop()
@@ -396,84 +381,46 @@ void WebServer::eventLoop()
     bool stop_server = false;
 
     while (!stop_server)
-    { // Proactor模式使用io_uring
-        if (is_ring && m_actormodel == 0)
+    {
+        int number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);
+        if (number < 0 && errno != EINTR)
         {
-            struct io_uring_cqe *cqe;
-
-            int ret = io_uring_wait_cqe(&m_ring, &cqe);
-            if (ret < 0)
-            {
-                LOG_ERROR("io_uring_wait_cqe failure, ret: %d", ret);
-                break;
-            }
-            struct conn_info *ci = (struct conn_info *)io_uring_cqe_get_data(cqe);
-            if (!ci)
-            {
-                LOG_ERROR("Invalid conn_info in CQE");
-                io_uring_cqe_seen(&m_ring, cqe);
-                continue;
-            }
-            if (ci->fd == m_listenfd && ci->op_type == OP_ACCEPT)
-            {
-                handle_async_accept(cqe);
-            }
-            else if (ci->op_type == OP_READ)
-            {
-                handle_async_read(cqe);
-            }
-            else if (ci->op_type == OP_WRITE)
-            {
-                handle_async_write(cqe);
-            }
-            else
-            {
-                LOG_ERROR("op_type error for fd: %d", ci->fd);
-            }
-            io_uring_cqe_seen(&m_ring, cqe);
+            LOG_ERROR("%s", "epoll failure");
+            break;
         }
-        else
+
+        for (int i = 0; i < number; i++)
         {
-            int number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);
-            if (number < 0 && errno != EINTR)
+            int sockfd = events[i].data.fd;
+
+            // 处理新到的客户连接
+            if (sockfd == m_listenfd)
             {
-                LOG_ERROR("%s", "epoll failure");
-                break;
+                bool flag = dealclientdata();
+                if (false == flag)
+                    continue;
             }
-
-            for (int i = 0; i < number; i++)
+            else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
             {
-                int sockfd = events[i].data.fd;
-
-                // 处理新到的客户连接
-                if (sockfd == m_listenfd)
-                {
-                    bool flag = dealclientdata();
-                    if (false == flag)
-                        continue;
-                }
-                else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
-                {
-                    // 服务器端关闭连接，移除对应的定时器
-                    util_timer *timer = users_timer[sockfd].timer;
-                    deal_timer(timer, sockfd);
-                }
-                // 处理信号
-                else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN))
-                {
-                    bool flag = dealwithsignal(timeout, stop_server);
-                    if (false == flag)
-                        LOG_ERROR("%s", "dealclientdata failure");
-                }
-                // 处理客户连接上接收到的数据
-                else if (events[i].events & EPOLLIN)
-                {
-                    dealwithread(sockfd);
-                }
-                else if (events[i].events & EPOLLOUT)
-                {
-                    dealwithwrite(sockfd);
-                }
+                // 服务器端关闭连接，移除对应的定时器
+                util_timer *timer = users_timer[sockfd].timer;
+                deal_timer(timer, sockfd);
+            }
+            // 处理信号
+            else if ((sockfd == m_pipefd[0]) && (events[i].events & EPOLLIN))
+            {
+                bool flag = dealwithsignal(timeout, stop_server);
+                if (false == flag)
+                    LOG_ERROR("%s", "dealclientdata failure");
+            }
+            // 处理客户连接上接收到的数据
+            else if (events[i].events & EPOLLIN)
+            {
+                dealwithread(sockfd);
+            }
+            else if (events[i].events & EPOLLOUT)
+            {
+                dealwithwrite(sockfd);
             }
         }
         if (timeout)
@@ -485,217 +432,4 @@ void WebServer::eventLoop()
             timeout = false;
         }
     }
-}
-
-/*从cqe->user_data获取conn_info。
-通过cqe->res获取新连接的sockfd（成功时res > 0）。
-释放conn_info的内存，避免泄漏。*/
-void WebServer::handle_async_accept(struct io_uring_cqe *cqe)
-{
-    struct conn_info *ci = (struct conn_info *)io_uring_cqe_get_data(cqe);
-    if (!ci)
-    {
-        LOG_ERROR("get user_data failed");
-        submit_async_accept();
-        return;
-    }
-
-    if (cqe->res < 0)
-    {
-        LOG_ERROR("async accept failed: %d", cqe->res);
-        free(ci);
-        submit_async_accept();
-        return;
-    }
-    int new_connfd = cqe->res;
-
-    if (http_conn::m_user_count >= MAX_FD)
-    {
-        LOG_ERROR("Internal server busy, too many connections");
-        close(new_connfd);
-        free(ci);
-        submit_async_accept();
-    }
-    // 为新连接创建并初始化一个http_conn实例
-    users[new_connfd].init(
-        new_connfd,
-        ci->client_addr,
-        m_root,
-        m_CONNTrigmode,
-        m_close_log,
-        m_user,
-        m_passWord,
-        m_databaseName);
-
-    timer(new_connfd, ci->client_addr);
-
-    if (!users[new_connfd].submit_async_read(&m_ring))
-    {
-        LOG_ERROR("submit async read failed for fd: %d", new_connfd);
-        users[new_connfd].close_conn();
-    }
-
-    free(ci);
-
-    submit_async_accept();
-}
-/*从cqe->user_data获取conn_info；
-通过cqe->res获取读取的字节数（>0为成功）；
-更新http_conn的m_read_idx，并触发后续处理（如解析 HTTP 请求）；
-释放conn_info内存，避免泄漏。*/
-void WebServer::handle_async_read(struct io_uring_cqe *cqe)
-{
-    struct conn_info *ci = (struct conn_info *)io_uring_cqe_get_data(cqe);
-    if (!ci)
-    {
-        LOG_ERROR("Invalid conn_info in async read");
-        return;
-    }
-    int sockfd = ci->fd;
-
-    int res = cqe->res;
-    if (res < 0)
-    {
-        LOG_ERROR("Read failed, fd: %d, res: %zd", sockfd, res);
-        users[sockfd].close_conn();
-    }
-    else if (res == 0)
-    {
-        LOG_INFO("Client closed connection, fd: %d", sockfd);
-        users[sockfd].close_conn();
-    }
-    else
-    {
-        int m_read_idx = users[sockfd].get_m_read_idx();
-        if (m_read_idx + res > users[sockfd].READ_BUFFER_SIZE)
-        {
-            LOG_ERROR("READ_BUFFER_SIZE overflow ,fd %d", sockfd);
-            users[sockfd].add_read_bytes(users[sockfd].READ_BUFFER_SIZE - (m_read_idx + res));
-            adjust_timer(users_timer[sockfd].timer);
-        }
-        else
-        {
-            users[sockfd].add_read_bytes(res);
-            adjust_timer(users_timer[sockfd].timer);
-        }
-        if (!m_pool->append_p(&users[sockfd]))
-        {
-            LOG_ERROR("Failed to append task to thread pool, fd: %d", sockfd);
-            users[sockfd].close_conn();
-        }
-        else
-        {
-            LOG_INFO("Task appended to thread pool for fd: %d, read %d bytes", sockfd, res);
-        }
-    }
-    free(ci);
-}
-bool WebServer::submit_async_accept()
-{
-    if (!is_ring)
-    {
-        LOG_ERROR("async accept is invalid,io_uring not unitialized");
-        return false;
-    }
-
-    struct conn_info *ci = (struct conn_info *)malloc(sizeof(struct conn_info));
-    if (!ci)
-    {
-        LOG_ERROR("malloc conn_info failed");
-        return false;
-    }
-
-    ci->fd = m_listenfd;
-    ci->op_type = OP_ACCEPT;
-    ci->client_len = sizeof(ci->client_addr);
-    utils.setnonblocking(m_listenfd);
-
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&m_ring);
-    if (!sqe)
-    {
-        LOG_ERROR("io_uring_get_sqe failed (queue full)");
-        free(ci);
-        return false;
-    }
-
-    io_uring_prep_accept(
-        sqe,
-        m_listenfd,
-        (struct sockaddr *)&(ci->client_addr),
-        &(ci->client_len),
-        0);
-
-    io_uring_sqe_set_data(sqe, ci);
-
-    int ret = io_uring_submit(&m_ring);
-    if (ret <= 0)
-    {
-        LOG_ERROR("io_uring_submit failed: %d, errno: %d", ret, errno);
-        free(ci);
-        return false;
-    }
-    LOG_INFO("Async accept request submitted successfully");
-    return true;
-}
-void WebServer::handle_async_write(struct io_uring_cqe *cqe)
-{
-
-    struct conn_info *ci = (struct conn_info *)io_uring_cqe_get_data(cqe);
-    if (!ci)
-    {
-        LOG_ERROR("Invalid conn_info in async write");
-        return;
-    }
-    int ret = cqe->res;
-    int sockfd = ci->fd;
-    if (ret < 0)
-    {
-        LOG_ERROR("async write error for fd: %d", ci->fd);
-        users[sockfd].close_conn();
-    }
-    else if (ret == 0)
-    {
-        LOG_INFO("Client closed connection during write, fd: %d", sockfd);
-        users[sockfd].close_conn();
-    }
-    else
-    {
-        users[sockfd].add_write_bytes(ret);
-        LOG_INFO("Async write completed, fd: %d, sent %d bytes", sockfd, ret);
-        adjust_timer(users_timer[sockfd].timer);
-        if (users[sockfd].get_bytes_have_send() < users[sockfd].get_bytes_to_send())
-        {
-            LOG_INFO("More data to send, fd: %d, remaining: %d bytes",
-                     sockfd, users[sockfd].get_bytes_to_send() - users[sockfd].get_bytes_have_send());
-            if (!users[sockfd].submit_async_write(&m_ring))
-            {
-                LOG_ERROR("Failed to submit async write, fd: %d", sockfd);
-                users[sockfd].close_conn();
-            }
-        }
-        else
-        {
-            LOG_INFO("Write completed, all %d bytes sent for fd: %d",
-                     users[sockfd].get_bytes_to_send(), sockfd);
-            if (users[sockfd].is_linger())
-            {
-                // 支持keep - alive
-                users[sockfd]
-                    .init();
-                LOG_INFO("Reset connection for keep-alive, fd: %d", sockfd);
-                if (!users[sockfd].submit_async_read(&m_ring))
-                {
-                    LOG_ERROR("Failed to submit async read, fd: %d", sockfd);
-                    users[sockfd].close_conn();
-                }
-            }
-            else
-
-            {
-                LOG_INFO("Closing non-keepalive connection, fd: %d", sockfd);
-                users[sockfd].close_conn();
-            }
-        }
-    }
-    free(ci);
 }

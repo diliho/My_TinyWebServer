@@ -1,3 +1,4 @@
+
 #ifndef WEBSERVER_H
 #define WEBSERVER_H
 
@@ -15,37 +16,15 @@
 #include "./threadpool/threadpool.h"
 #include "./http/http_conn.h"
 
-#include <liburing.h>
-
 const int MAX_FD = 65536;           // 最大文件描述符
 const int MAX_EVENT_NUMBER = 10000; // 最大事件数
 const int TIMESLOT = 5;             // 最小超时单位
-const int RING_ENTRIES = 1024;      // io_uring队列深度
 
-#define OP_ACCEPT 0
-#define OP_READ 1
-#define OP_WRITE 2
-
-struct conn_info
-{
-    int fd;
-    int op_type;
-    struct sockaddr_in client_addr; // 客户端地址（用于存储内核返回的地址）
-    socklen_t client_len;           // 地址长度（用于存储内核返回的长度）
-};
 class WebServer
 {
-private:
-    static WebServer *m_instance;
-
 public:
     WebServer();
     ~WebServer();
-
-    static WebServer *get_instance()
-    {
-        return m_instance;
-    }
 
     void init(int port, string user, string passWord, string databaseName,
               int log_write, int opt_linger, int trigmode, int sql_num,
@@ -100,15 +79,5 @@ public:
     // 定时器相关
     client_data *users_timer;
     Utils utils;
-
-    // 新增
-public:
-    struct io_uring m_ring;
-    bool is_ring;
-    void uring_init();
-    bool submit_async_accept();
-    void handle_async_read(struct io_uring_cqe *cqe);
-    void handle_async_write(struct io_uring_cqe *cqe);
-    void handle_async_accept(struct io_uring_cqe *cqe);
 };
 #endif

@@ -3,9 +3,6 @@
 #include <mysql/mysql.h>
 #include <fstream>
 
-#include <liburing.h>
-#include "../webserver.h"
-
 // 定义http响应的一些状态信息
 const char *ok_200_title = "OK";
 const char *error_400_title = "Bad Request";
@@ -206,7 +203,7 @@ bool http_conn::read_once()
     }
     int bytes_read = 0;
 
-    // LT读取数据(epoll_wait持续返回事件)
+    // LT读取数据
     if (0 == m_TRIGMode)
     {
         bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0);
@@ -219,7 +216,7 @@ bool http_conn::read_once()
 
         return true;
     }
-    // ET读数据(只通知一次 必须一次性全部读)
+    // ET读数据
     else
     {
         while (true)
@@ -606,7 +603,7 @@ bool http_conn::add_status_line(int status, const char *title)
 }
 bool http_conn::add_headers(int content_len)
 {
-    return add_content_length(content_len) && add_content_type() && add_linger() &&
+    return add_content_length(content_len) && add_linger() &&
            add_blank_line();
 }
 bool http_conn::add_content_length(int content_len)
@@ -693,121 +690,13 @@ void http_conn::process()
     HTTP_CODE read_ret = process_read();
     if (read_ret == NO_REQUEST)
     {
-        if (WebServer::get_instance()->is_ring == false)
-        {
-            modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
-        }
-        else
-        {
-            // 在proactor模式下，如果没有足够的数据继续读取，需要重新提交异步读
-            if (!submit_async_read(&WebServer::get_instance()->m_ring))
-            {
-                LOG_ERROR("Failed to resubmit async read, fd: %d", m_sockfd);
-                close_conn();
-            }
-        }
+        modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
         return;
     }
     bool write_ret = process_write(read_ret);
     if (!write_ret)
     {
         close_conn();
-        return;
     }
-    if (WebServer::get_instance()->is_ring == false)
-    {
-        modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
-    }
-    else
-    {
-        // 在proactor模式下，处理完请求后需要提交异步写操作
-        if (!submit_async_write(&WebServer::get_instance()->m_ring))
-        {
-            LOG_ERROR("Failed to submit async write, fd: %d", m_sockfd);
-            close_conn();
-        }
-    }
-    return;
-}
-bool http_conn::submit_async_read(struct io_uring *ring)
-{
-    if (m_read_idx > READ_BUFFER_SIZE)
-    {
-        LOG_ERROR("Read buffer full, fd: %d", m_sockfd);
-        return false;
-    }
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-    if (!sqe)
-    {
-        LOG_ERROR("Failed to get SQE for read, fd: %d", m_sockfd);
-        return false;
-    }
-    size_t read_size = READ_BUFFER_SIZE - m_read_idx;
-    io_uring_prep_read(
-        sqe,
-        m_sockfd,
-        m_read_buf + m_read_idx,
-        read_size,
-        0);
-
-    struct conn_info *ci = (struct conn_info *)malloc(sizeof(struct conn_info));
-    if (!ci)
-    {
-        LOG_ERROR("Malloc conn_info failed, fd: %d", m_sockfd);
-        return false;
-    }
-    ci->fd = m_sockfd;
-    ci->op_type = OP_READ;
-
-    io_uring_sqe_set_data(sqe, ci);
-
-    int ret = io_uring_submit(ring);
-    if (ret <= 0)
-    {
-        LOG_ERROR("io_uring_submit read failed: %d, errno: %d, fd: %d", ret, errno, m_sockfd);
-        free(ci);
-        return false;
-    }
-
-    return true;
-}
-bool http_conn::submit_async_write(struct io_uring *ring)
-{
-    if (bytes_to_send == 0)
-    {
-        if (!m_linger)
-            return close_conn(), true;
-        return true;
-    }
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-    if (!sqe)
-    {
-        LOG_ERROR("Failed to get SQE for read, fd: %d", m_sockfd);
-        return false;
-    }
-    io_uring_prep_write(
-        sqe,
-        m_sockfd,
-        m_write_buf + bytes_have_send,
-        bytes_to_send - bytes_have_send,
-        0);
-    struct conn_info *ci = (struct conn_info *)malloc(sizeof(struct conn_info));
-    if (!ci)
-    {
-        LOG_ERROR("Malloc conn_info failed, fd: %d", m_sockfd);
-        return false;
-    }
-    ci->fd = m_sockfd;
-    ci->op_type = OP_WRITE;
-    io_uring_sqe_set_data(sqe, ci);
-
-    int ret = io_uring_submit(ring);
-    if (ret <= 0)
-    {
-        LOG_ERROR("io_uring_submit write failed: %d, errno: %d, fd: %d", ret, errno, m_sockfd);
-        free(ci);
-        return false;
-    }
-
-    return true;
+    modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
 }

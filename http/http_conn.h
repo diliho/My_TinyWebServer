@@ -20,7 +20,6 @@
 #include <sys/wait.h>
 #include <sys/uio.h>
 #include <map>
-#include <vector>
 
 #include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
@@ -72,7 +71,6 @@ public:
 public:
     http_conn() {}
     ~http_conn() {}
-    void init();
 
 public:
     void init(int sockfd, const sockaddr_in &addr, char *, int, int, string user, string passwd, string sqlname);
@@ -89,6 +87,7 @@ public:
     int improv;
 
 private:
+    void init();
     HTTP_CODE process_read();
     bool process_write(HTTP_CODE ret);
     HTTP_CODE parse_request_line(char *text);
@@ -147,19 +146,6 @@ private:
     char sql_user[100];
     char sql_passwd[100];
     char sql_name[100];
-
-public:
-    bool submit_async_read(struct io_uring *m_uring);
-    bool submit_async_write(struct io_uring *m_uring);
-
-    void add_read_bytes(int bytes) { m_read_idx += bytes; };
-    int get_m_read_idx() const { return m_read_idx; };
-
-    int get_bytes_to_send() const { return bytes_to_send; };
-    int get_bytes_have_send() const { return bytes_have_send; };
-    void add_write_bytes(int bytes) { bytes_have_send += bytes; };
-
-    bool is_linger() const { return m_linger; };
 };
 
 #endif

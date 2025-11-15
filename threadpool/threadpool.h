@@ -7,14 +7,13 @@
 #include <pthread.h>
 #include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
-#include <liburing.h>
 
 template <typename T>
 class threadpool
 {
 public:
-    threadpool(int actor_model, connection_pool *connPool, struct io_uring *ring,
-               int thread_number = 8, int max_request = 10000);
+    /*thread_number是线程池中线程的数量，max_requests是请求队列中最多允许的、等待处理的请求的数量*/
+    threadpool(int actor_model, connection_pool *connPool, int thread_number = 8, int max_request = 10000);
     ~threadpool();
     bool append(T *request, int state);
     bool append_p(T *request);
@@ -33,12 +32,9 @@ private:
     sem m_queuestat;             // 是否有任务需要处理
     connection_pool *m_connPool; // 数据库
     int m_actor_model;           // 模型切换
-    struct io_uring *m_ring;
 };
 template <typename T>
-/* 构造函数参数列表添加ring，初始化列表初始化m_ring */
-threadpool<T>::threadpool(int actor_model, connection_pool *connPool, struct io_uring *ring, int thread_number, int max_requests) : m_actor_model(actor_model), m_thread_number(thread_number), m_max_requests(max_requests),
-                                                                                                                                    m_threads(NULL), m_connPool(connPool), m_ring(ring) // 初始化m_ring
+threadpool<T>::threadpool(int actor_model, connection_pool *connPool, int thread_number, int max_requests) : m_actor_model(actor_model), m_thread_number(thread_number), m_max_requests(max_requests), m_threads(NULL), m_connPool(connPool)
 {
     if (thread_number <= 0 || max_requests <= 0)
         throw std::exception();
@@ -148,18 +144,8 @@ void threadpool<T>::run()
         }
         else
         {
-            LOG_INFO("Processing request in Proactor mode");
             connectionRAII mysqlcon(&request->mysql, m_connPool);
             request->process();
-            if (!request->submit_async_write(m_ring))
-            {
-                LOG_ERROR("Failed to submit async write in thread pool");
-                request->close_conn();
-            }
-            else
-            {
-                LOG_INFO("Async write submitted successfully");
-            }
         }
     }
 }
