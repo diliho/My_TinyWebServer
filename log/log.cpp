@@ -10,18 +10,34 @@ Log::Log()
 {
     m_count = 0;
     m_is_async = false;
+    m_fp = NULL;
+    m_buf = NULL;
+    m_log_queue = NULL;
 }
 
 Log::~Log()
 {
+    if (m_buf != NULL) {
+        delete[] m_buf;
+    }
     if (m_fp != NULL)
     {
         fclose(m_fp);
+    }
+    if (m_log_queue != NULL) {
+        delete m_log_queue;
     }
 }
 //异步需要设置阻塞队列的长度，同步不需要设置
 bool Log::init(const char *file_name, int close_log, int log_buf_size, int split_lines, int max_queue_size)
 {
+    m_close_log = close_log;
+    
+    // 当日志关闭时，不进行任何资源分配
+    if (m_close_log == 1) {
+        return true;
+    }
+    
     //如果设置了max_queue_size,则设置为异步
     if (max_queue_size >= 1)
     {
@@ -32,7 +48,6 @@ bool Log::init(const char *file_name, int close_log, int log_buf_size, int split
         pthread_create(&tid, NULL, flush_log_thread, NULL);
     }
     
-    m_close_log = close_log;
     m_log_buf_size = log_buf_size;
     m_buf = new char[m_log_buf_size];
     memset(m_buf, '\0', m_log_buf_size);
@@ -42,7 +57,6 @@ bool Log::init(const char *file_name, int close_log, int log_buf_size, int split
     struct tm *sys_tm = localtime(&t);
     struct tm my_tm = *sys_tm;
 
- 
     const char *p = strrchr(file_name, '/');
     char log_full_name[256] = {0};
 
@@ -70,6 +84,16 @@ bool Log::init(const char *file_name, int close_log, int log_buf_size, int split
 
 void Log::write_log(int level, const char *format, ...)
 {
+    // 检查日志是否关闭
+    if (m_close_log == 1) {
+        return;
+    }
+    
+    // 确保m_fp不为NULL
+    if (m_fp == NULL) {
+        return;
+    }
+    
     struct timeval now = {0, 0};
     gettimeofday(&now, NULL);
     time_t t = now.tv_sec;
@@ -97,7 +121,7 @@ void Log::write_log(int level, const char *format, ...)
     //写入一个log，对m_count++, m_split_lines最大行数
     m_mutex.lock();
     m_count++;
-
+    
     if (m_today != my_tm.tm_mday || m_count % m_split_lines == 0) //everyday log
     {
         
@@ -105,9 +129,9 @@ void Log::write_log(int level, const char *format, ...)
         fflush(m_fp);
         fclose(m_fp);
         char tail[16] = {0};
-       
+        
         snprintf(tail, 16, "%d_%02d_%02d_", my_tm.tm_year + 1900, my_tm.tm_mon + 1, my_tm.tm_mday);
-       
+        
         if (m_today != my_tm.tm_mday)
         {
             snprintf(new_log, 255, "%s%s%s", dir_name, tail, log_name);
@@ -119,6 +143,11 @@ void Log::write_log(int level, const char *format, ...)
             snprintf(new_log, 255, "%s%s%s.%lld", dir_name, tail, log_name, m_count / m_split_lines);
         }
         m_fp = fopen(new_log, "a");
+        // 重新检查文件是否成功打开
+        if (m_fp == NULL) {
+            m_mutex.unlock();
+            return;
+        }
     }
  
     m_mutex.unlock();
@@ -148,7 +177,10 @@ void Log::write_log(int level, const char *format, ...)
     else
     {
         m_mutex.lock();
-        fputs(log_str.c_str(), m_fp);
+        // 再次检查m_fp是否为NULL
+        if (m_fp != NULL) {
+            fputs(log_str.c_str(), m_fp);
+        }
         m_mutex.unlock();
     }
 
@@ -157,6 +189,11 @@ void Log::write_log(int level, const char *format, ...)
 
 void Log::flush(void)
 {
+    // 检查日志是否关闭或m_fp是否为NULL
+    if (m_close_log == 1 || m_fp == NULL) {
+        return;
+    }
+    
     m_mutex.lock();
     //强制刷新写入流缓冲区
     fflush(m_fp);
