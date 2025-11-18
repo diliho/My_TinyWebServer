@@ -16,6 +16,13 @@
 #include "./threadpool/threadpool.h"
 #include "./http/http_conn.h"
 
+//新增
+#include"liburing.h"
+const int queue_depth=1024;
+#define OP_ACCEPT 0
+#define OP_READ 1
+#define OP_WRITE 2
+
 const int MAX_FD = 65536;           // 最大文件描述符
 const int MAX_EVENT_NUMBER = 10000; // 最大事件数
 const int TIMESLOT = 5;             // 最小超时单位
@@ -43,6 +50,11 @@ public:
     bool dealwithsignal(bool &timeout, bool &stop_server);
     void dealwithread(int sockfd);
     void dealwithwrite(int sockfd);
+
+    //新增
+void io_uring_init();
+void submit_async_accept();
+void handle_async_accept();
 
 public:
     // 基础
@@ -79,5 +91,16 @@ public:
     // 定时器相关
     client_data *users_timer;
     Utils utils;
+
+    //新增
+public:
+struct io_uring m_ring;
+struct conn_info
+{
+    int fd;
+    struct sockaddr_in address;
+    socklen_t len;
+    int op_type;
+};
 };
 #endif

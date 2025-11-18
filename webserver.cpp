@@ -27,6 +27,12 @@ WebServer::~WebServer()
     delete[] users;
     delete[] users_timer;
     delete m_pool;
+
+    //新增
+    if(m_actormodel==0)
+    {
+        io_uring_queue_exit(&m_ring);
+    }
 }
 
 void WebServer::init(int port, string user, string passWord, string databaseName, int log_write,
@@ -43,8 +49,22 @@ void WebServer::init(int port, string user, string passWord, string databaseName
     m_TRIGMode = trigmode;
     m_close_log = close_log;
     m_actormodel = actor_model;
-}
 
+    if(m_actormodel==0)
+    {
+        io_uring_init();
+    }
+}
+// 修复io_uring_queue_init函数调用
+void WebServer::io_uring_init()
+{
+    int ret=io_uring_queue_init(queue_depth, &m_ring, 0);
+    if(ret<0)
+    {
+      LOG_ERROR("io_uring_queue_init failed:%d",ret);
+      exit(-1);
+    }
+}
 void WebServer::trig_mode()
 {
     // LT + LT
@@ -140,7 +160,10 @@ void WebServer::eventListen()
     m_epollfd = epoll_create(5);
     assert(m_epollfd != -1);
 
-    utils.addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);
+  
+//reactor模式下需要将listenfd放入epoll中
+if(m_actormodel==1)
+    {utils.addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);}
     http_conn::m_epollfd = m_epollfd;
 
     ret = socketpair(PF_UNIX, SOCK_STREAM, 0, m_pipefd);
@@ -157,8 +180,42 @@ void WebServer::eventListen()
     // 工具类,信号和描述符基础操作
     Utils::u_pipefd = m_pipefd;
     Utils::u_epollfd = m_epollfd;
-}
 
+    //proactor实现异步accept
+    if(m_actormodel==0)
+    {
+        submit_async_accept();
+    }
+}
+// 修复conn_info结构体成员名
+void WebServer::submit_async_accept()
+{
+
+    struct io_uring_sqe *sqe=io_uring_get_sqe(&m_ring);
+    if(!sqe)
+    {
+        LOG_ERROR("io_uring_get_sqe failed");
+        return;
+    }
+    conn_info*listen_info=new conn_info();
+    listen_info->fd=m_listenfd;
+    listen_info->len=sizeof(struct sockaddr_in);
+    listen_info->op_type=OP_ACCEPT;
+    io_uring_prep_accept(
+        sqe,
+        m_listenfd,
+        (struct sockaddr*)&listen_info->address,
+        &listen_info->len,
+        0
+    );
+    io_uring_sqe_set_data(sqe,listen_info);
+    int ret=io_uring_submit(&m_ring);
+    if(ret<0)
+    {
+        LOG_ERROR("io_uring_submit failed ret: %d fd: %d",ret,m_listenfd);
+        delete listen_info;
+    }
+}
 void WebServer::timer(int connfd, struct sockaddr_in client_address)
 {
     users[connfd].init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
@@ -381,7 +438,11 @@ void WebServer::eventLoop()
     bool stop_server = false;
 
     while (!stop_server)
-    {
+    {     
+        if(m_actormodel==0)
+        {
+            handle_async_accept();
+        }
         int number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);
         if (number < 0 && errno != EINTR)
         {
@@ -431,5 +492,58 @@ void WebServer::eventLoop()
 
             timeout = false;
         }
+    }
+}
+
+// 修复handle_async_accept()函数中缩进和else语句问题
+void WebServer::handle_async_accept()
+{
+    struct io_uring_cqe *cqe;
+    int ret;
+    
+    // 非阻塞地获取完成事件
+    while ((ret = io_uring_peek_cqe(&m_ring, &cqe)) == 0)
+    {
+        conn_info* listen_info = (conn_info*)io_uring_cqe_get_data(cqe);
+        if (listen_info && listen_info->op_type == OP_ACCEPT)
+        {
+            int connfd = cqe->res;
+            if (connfd >= 0)
+            {
+                struct sockaddr_in client_addr = listen_info->address; 
+                socklen_t addrlen = listen_info->len; 
+                
+                if (http_conn::m_user_count >= MAX_FD)
+                {
+                    utils.show_error(connfd, "Internal server busy");
+                    LOG_ERROR("%s", "Internal server busy");
+                    close(connfd);
+                }
+                else
+                {
+                    utils.setnonblocking(connfd);
+                    utils.addfd(m_epollfd, connfd, true, m_CONNTrigmode);
+                    timer(connfd, client_addr);
+                    LOG_INFO("New connection Async Accept, fd:%d", connfd);
+                }
+            }
+            else
+            {
+                LOG_ERROR("Invalid fd Async Accept, fd:%d", connfd);
+            }
+        }
+        else
+        {
+            if (listen_info)
+               { LOG_ERROR("Invalid cqe op_type: %d", listen_info->op_type);}
+            else
+              {  LOG_ERROR("Invalid cqe data: NULL");}
+        }
+        
+        if (listen_info)
+            delete listen_info;
+        
+        io_uring_cqe_seen(&m_ring, cqe);
+        submit_async_accept();
     }
 }
