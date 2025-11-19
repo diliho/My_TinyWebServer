@@ -3,8 +3,9 @@
 
 WebServer::WebServer()
 {
-    // http_conn类对象
-    users = new http_conn[MAX_FD];
+    // 初始化指针数组
+    memset(users, 0, sizeof(users));
+    memset(users_timer, 0, sizeof(users_timer));
 
     // root文件夹路径
     char server_path[200];
@@ -14,8 +15,9 @@ WebServer::WebServer()
     strcpy(m_root, server_path);
     strcat(m_root, root);
 
-    // 定时器
-    users_timer = new client_data[MAX_FD];
+    // 初始化内存池
+    m_http_conn_pool = new MemPool<http_conn>();
+    m_client_data_pool = new MemPool<client_data>();
 }
 
 WebServer::~WebServer()
@@ -24,9 +26,23 @@ WebServer::~WebServer()
     close(m_listenfd);
     close(m_pipefd[1]);
     close(m_pipefd[0]);
-    delete[] users;
-    delete[] users_timer;
+    
+    // 使用内存池释放资源
+    for (int i = 0; i < MAX_FD; i++) {
+        if (users[i]) {
+            m_http_conn_pool->deallocate(users[i]);
+            users[i] = nullptr;
+        }
+        if (users_timer[i]) {
+            m_client_data_pool->deallocate(users_timer[i]);
+            users_timer[i] = nullptr;
+        }
+    }
+    
+    free(m_root);
     delete m_pool;
+    delete m_http_conn_pool;
+    delete m_client_data_pool;
 }
 
 void WebServer::init(int port, string user, string passWord, string databaseName, int log_write,
@@ -91,8 +107,10 @@ void WebServer::sql_pool()
     m_connPool = connection_pool::GetInstance();
     m_connPool->init("localhost", m_user, m_passWord, m_databaseName, 3306, m_sql_num, m_close_log);
 
-    // 初始化数据库读取表
-    users->initmysql_result(m_connPool);
+    // 初始化数据库读取表 - 修复错误：users是指针数组，不能直接用->
+    // 需要初始化一个临时对象用于表结构初始化
+    http_conn tmp_conn;
+    tmp_conn.initmysql_result(m_connPool);
 }
 
 void WebServer::thread_pool()
@@ -161,18 +179,30 @@ void WebServer::eventListen()
 
 void WebServer::timer(int connfd, struct sockaddr_in client_address)
 {
-    users[connfd].init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
+    // 从内存池分配http_conn对象
+    if (!users[connfd]) {
+        users[connfd] = m_http_conn_pool->allocate();
+    }
+    
+    // 初始化http连接
+    users[connfd]->init(connfd, client_address, m_root, m_CONNTrigmode, m_close_log, m_user, m_passWord, m_databaseName);
 
+    // 从内存池分配client_data对象
+    if (!users_timer[connfd]) {
+        users_timer[connfd] = m_client_data_pool->allocate();
+    }
+    
     // 初始化client_data数据
-    // 创建定时器，设置回调函数和超时时间，绑定用户数据，将定时器添加到链表中
-    users_timer[connfd].address = client_address;
-    users_timer[connfd].sockfd = connfd;
+    users_timer[connfd]->address = client_address;
+    users_timer[connfd]->sockfd = connfd;
+    
+    // 创建定时器
     util_timer *timer = new util_timer;
-    timer->user_data = &users_timer[connfd];
+    timer->user_data = users_timer[connfd];
     timer->cb_func = cb_func;
     time_t cur = time(NULL);
     timer->expire = cur + 3 * TIMESLOT;
-    users_timer[connfd].timer = timer;
+    users_timer[connfd]->timer = timer;
     utils.m_timer_lst.add_timer(timer);
 }
 
@@ -189,13 +219,26 @@ void WebServer::adjust_timer(util_timer *timer)
 
 void WebServer::deal_timer(util_timer *timer, int sockfd)
 {
-    timer->cb_func(&users_timer[sockfd]);
-    if (timer)
-    {
+    if (timer) {
+        timer->cb_func(users_timer[sockfd]);
         utils.m_timer_lst.del_timer(timer);
+        // 删除下面这行，因为del_timer内部已经释放了timer
+        // delete timer;
     }
 
-    LOG_INFO("close fd %d", users_timer[sockfd].sockfd);
+    // 释放内存池中的对象
+    if (users[sockfd]) {
+        users[sockfd]->close_conn();
+        m_http_conn_pool->deallocate(users[sockfd]);
+        users[sockfd] = nullptr;
+    }
+    
+    if (users_timer[sockfd]) {
+        m_client_data_pool->deallocate(users_timer[sockfd]);
+        users_timer[sockfd] = nullptr;
+    }
+
+    LOG_INFO("close fd %d", sockfd);
 }
 
 bool WebServer::dealclientdata()
@@ -280,7 +323,8 @@ bool WebServer::dealwithsignal(bool &timeout, bool &stop_server)
 
 void WebServer::dealwithread(int sockfd)
 {
-    util_timer *timer = users_timer[sockfd].timer;
+    // 修复：users_timer[sockfd]是指针，使用->访问成员
+    util_timer *timer = users_timer[sockfd]->timer;
 
     // reactor
     if (1 == m_actormodel)
@@ -290,19 +334,23 @@ void WebServer::dealwithread(int sockfd)
             adjust_timer(timer);
         }
 
-        // 若监测到读事件，将该事件放入请求队列
-        m_pool->append(users + sockfd, 0);
+        // 修复：传递正确的http_conn*指针
+        m_pool->append(users[sockfd], 0);
 
         while (true)
         {
-            if (1 == users[sockfd].improv)
+            // 修复：users[sockfd]是指针，使用->访问成员
+            if (1 == users[sockfd]->improv)
             {
-                if (1 == users[sockfd].timer_flag)
+                // 修复：users[sockfd]是指针，使用->访问成员
+                if (1 == users[sockfd]->timer_flag)
                 {
                     deal_timer(timer, sockfd);
-                    users[sockfd].timer_flag = 0;
+                    // 修复：users[sockfd]是指针，使用->访问成员
+                    users[sockfd]->timer_flag = 0;
                 }
-                users[sockfd].improv = 0;
+                // 修复：users[sockfd]是指针，使用->访问成员
+                users[sockfd]->improv = 0;
                 break;
             }
         }
@@ -310,12 +358,14 @@ void WebServer::dealwithread(int sockfd)
     else
     {
         // proactor
-        if (users[sockfd].read_once())
+        // 修复：users[sockfd]是指针，使用->访问成员
+        if (users[sockfd]->read_once())
         {
-            LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+            // 修复：users[sockfd]是指针，使用->访问成员
+            LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd]->get_address()->sin_addr));
 
-            // 若监测到读事件，将该事件放入请求队列
-            m_pool->append_p(users + sockfd);
+            // 修复：传递正确的http_conn*指针
+            m_pool->append_p(users[sockfd]);
 
             if (timer)
             {
@@ -331,7 +381,8 @@ void WebServer::dealwithread(int sockfd)
 
 void WebServer::dealwithwrite(int sockfd)
 {
-    util_timer *timer = users_timer[sockfd].timer;
+    // 修复：users_timer[sockfd]是指针，使用->访问成员
+    util_timer *timer = users_timer[sockfd]->timer;
     // reactor
     if (1 == m_actormodel)
     {
@@ -340,18 +391,23 @@ void WebServer::dealwithwrite(int sockfd)
             adjust_timer(timer);
         }
 
-        m_pool->append(users + sockfd, 1);
+        // 修复：传递正确的http_conn*指针
+        m_pool->append(users[sockfd], 1);
 
         while (true)
         {
-            if (1 == users[sockfd].improv)
+            // 修复：users[sockfd]是指针，使用->访问成员
+            if (1 == users[sockfd]->improv)
             {
-                if (1 == users[sockfd].timer_flag)
+                // 修复：users[sockfd]是指针，使用->访问成员
+                if (1 == users[sockfd]->timer_flag)
                 {
                     deal_timer(timer, sockfd);
-                    users[sockfd].timer_flag = 0;
+                    // 修复：users[sockfd]是指针，使用->访问成员
+                    users[sockfd]->timer_flag = 0;
                 }
-                users[sockfd].improv = 0;
+                // 修复：users[sockfd]是指针，使用->访问成员
+                users[sockfd]->improv = 0;
                 break;
             }
         }
@@ -359,9 +415,11 @@ void WebServer::dealwithwrite(int sockfd)
     else
     {
         // proactor
-        if (users[sockfd].write())
+        // 修复：users[sockfd]是指针，使用->访问成员
+        if (users[sockfd]->write())
         {
-            LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+            // 修复：users[sockfd]是指针，使用->访问成员
+            LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd]->get_address()->sin_addr));
 
             if (timer)
             {
@@ -403,7 +461,8 @@ void WebServer::eventLoop()
             else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
             {
                 // 服务器端关闭连接，移除对应的定时器
-                util_timer *timer = users_timer[sockfd].timer;
+                // 修复：users_timer[sockfd]是指针，使用->访问成员
+                util_timer *timer = users_timer[sockfd]->timer;
                 deal_timer(timer, sockfd);
             }
             // 处理信号

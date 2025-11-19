@@ -1,6 +1,19 @@
 #include "lst_timer.h"
 #include "../http/http_conn.h"
 
+// 前向声明
+class Utils;
+
+// 定义回调函数
+void cb_func(client_data *user_data)
+{
+    if (user_data) {
+        // 只关闭连接，不释放内存，内存释放由WebServer::deal_timer处理
+        close(user_data->sockfd);
+        http_conn::m_user_count--;
+    }
+}
+
 sort_timer_lst::sort_timer_lst()
 {
     head = NULL;
@@ -213,12 +226,3 @@ void Utils::show_error(int connfd, const char *info)
 
 int *Utils::u_pipefd = 0;
 int Utils::u_epollfd = 0;
-
-class Utils;
-void cb_func(client_data *user_data)
-{
-    epoll_ctl(Utils::u_epollfd, EPOLL_CTL_DEL, user_data->sockfd, 0);
-    assert(user_data);
-    close(user_data->sockfd);
-    http_conn::m_user_count--;
-}

@@ -15,6 +15,7 @@
 
 #include "./threadpool/threadpool.h"
 #include "./http/http_conn.h"
+#include "./mempool/mempool.h"
 
 const int MAX_FD = 65536;           // 最大文件描述符
 const int MAX_EVENT_NUMBER = 10000; // 最大事件数
@@ -54,7 +55,7 @@ public:
 
     int m_pipefd[2];
     int m_epollfd;
-    http_conn *users;
+    http_conn *users[MAX_FD];  // 修改为数组指针
 
     // 数据库相关
     connection_pool *m_connPool;
@@ -77,7 +78,11 @@ public:
     int m_CONNTrigmode;
 
     // 定时器相关
-    client_data *users_timer;
+    client_data *users_timer[MAX_FD];  // 修改为数组指针
     Utils utils;
+    
+    // 内存池
+    MemPool<http_conn> *m_http_conn_pool;
+    MemPool<client_data> *m_client_data_pool;
 };
 #endif

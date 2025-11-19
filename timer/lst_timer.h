@@ -97,6 +97,9 @@ public:
     int m_TIMESLOT;
 };
 
+// 前向声明
+class WebServer;
+
 void cb_func(client_data *user_data);
 
 #endif
