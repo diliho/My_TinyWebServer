@@ -16,8 +16,8 @@ WebServer::WebServer()
     strcat(m_root, root);
 
     // 初始化内存池
-    m_http_conn_pool = new MemPool<http_conn>();
-    m_client_data_pool = new MemPool<client_data>();
+    m_http_conn_pool = new MemPool<http_conn>(10000);
+    m_client_data_pool = new MemPool<client_data>(10000);
 }
 
 WebServer::~WebServer()
@@ -399,14 +399,14 @@ void WebServer::dealwithwrite(int sockfd)
             // 修复：users[sockfd]是指针，使用->访问成员
             if (1 == users[sockfd]->improv)
             {
-                // 修复：users[sockfd]是指针，使用->访问成员
+              
                 if (1 == users[sockfd]->timer_flag)
                 {
                     deal_timer(timer, sockfd);
-                    // 修复：users[sockfd]是指针，使用->访问成员
+                
                     users[sockfd]->timer_flag = 0;
                 }
-                // 修复：users[sockfd]是指针，使用->访问成员
+               
                 users[sockfd]->improv = 0;
                 break;
             }
@@ -415,10 +415,10 @@ void WebServer::dealwithwrite(int sockfd)
     else
     {
         // proactor
-        // 修复：users[sockfd]是指针，使用->访问成员
+       
         if (users[sockfd]->write())
         {
-            // 修复：users[sockfd]是指针，使用->访问成员
+            
             LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd]->get_address()->sin_addr));
 
             if (timer)
@@ -461,7 +461,7 @@ void WebServer::eventLoop()
             else if (events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
             {
                 // 服务器端关闭连接，移除对应的定时器
-                // 修复：users_timer[sockfd]是指针，使用->访问成员
+                
                 util_timer *timer = users_timer[sockfd]->timer;
                 deal_timer(timer, sockfd);
             }
